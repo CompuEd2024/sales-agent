@@ -14,13 +14,13 @@ import { useLanguage } from '../lib/i18n';
 import { useAgent } from '../context/AgentContext';
 
 interface AuthViewProps {
-  onOpenSupabaseConfig: () => void;
+  onOpenSupabaseConfig?: () => void;
 }
 
 const AGENT_NOT_RECOGNIZED_MESSAGE =
   'Agent not recognized. You are not registered as an agent, so you cannot enter the app.';
 
-export function AuthView({ onOpenSupabaseConfig }: AuthViewProps) {
+export function AuthView({ onOpenSupabaseConfig: _onOpenSupabaseConfig }: AuthViewProps) {
   const { showToast } = useToast();
   const { t, toggleLanguage, isRTL } = useLanguage();
   const { login, error: agentError, clearError } = useAgent();
@@ -120,13 +120,6 @@ export function AuthView({ onOpenSupabaseConfig }: AuthViewProps) {
                 </strong>
               </span>
             </div>
-            <button
-              type="button"
-              onClick={onOpenSupabaseConfig}
-              className="min-h-[44px] px-3 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 hover:bg-slate-200/60 rounded-lg underline decoration-slate-300 transition-colors shrink-0"
-            >
-              {t('configureDbBtn')}
-            </button>
           </div>
 
           <form onSubmit={handleAuthSubmit} className="space-y-4">
