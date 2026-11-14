@@ -1,0 +1,8 @@
+{
+  "name": "Remix Sales Agent Portal Nov 13",
+  "description": "Sales agent portal to onboard optical shops, manage subscription tiers, configure branding, and track 50/50 commission splits with Supabase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
