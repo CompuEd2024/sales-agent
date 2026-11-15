@@ -383,40 +383,44 @@ async function startServer() {
       };
     }
 
-    const apiKey = process.env.EXCHANGE_RATE_API_KEY;
-    const url = apiKey
-      ? `https://v6.exchangerate-api.com/v6/${apiKey}/latest/JOD`
-      : 'https://open.er-api.com/v6/latest/JOD';
+    const apiKey = (process.env.EXCHANGE_RATE_API_KEY || '').trim();
+    // Keyed endpoint first (if a key exists), then the free keyless endpoint as a backup.
+    const urls: string[] = [];
+    if (apiKey) urls.push(`https://v6.exchangerate-api.com/v6/${apiKey}/latest/JOD`);
+    urls.push('https://open.er-api.com/v6/latest/JOD');
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    for (const url of urls) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const label = url.includes('open.er-api.com') ? 'open.er-api.com' : 'v6 keyed';
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        const data: any = await res.json().catch(() => null);
 
-    try {
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
+        // The keyed v6 endpoint returns "conversion_rates"; the open endpoint returns "rates".
+        const rates = data && (data.conversion_rates || data.rates);
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.result === 'success' && data.rates && typeof data.rates === 'object') {
+        if (res.ok && data && data.result === 'success' && rates && typeof rates === 'object') {
           const fetchedAt = new Date().toISOString();
-          ratesCache = {
-            rates: data.rates,
-            fetchedAt,
-          };
-          console.log(`[rates] live, ${fetchedAt}`);
+          ratesCache = { rates, fetchedAt };
+          console.log(`[rates] live via ${label}, ${fetchedAt}`);
           return {
             base: 'JOD',
-            rates: data.rates,
+            rates,
             fetchedAt,
             source: 'live',
             attribution,
             attributionUrl,
           };
         }
+        console.warn(
+          `[rates] ${label} failed: http ${res.status}, result=${data?.result}, error-type=${data?.['error-type']}`
+        );
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        console.warn(`[rates] ${label} fetch failed or timed out:`, err?.message || err);
       }
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      console.warn('[rates] fetch failed or timed out:', err?.message || err);
     }
 
     // If refresh failed but we have a previous cache, serve as stale
@@ -547,7 +551,7 @@ async function startServer() {
                 messageAr: conflictMessageAr,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
 
           // 4. Check agents table
           try {
@@ -566,7 +570,7 @@ async function startServer() {
                 messageAr: conflictMessageAr,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
 
           // 5. Check shops table (owner_email)
           try {
@@ -589,7 +593,7 @@ async function startServer() {
                 messageAr: conflictMessageAr,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
 
           // 6. Check shop_staff_credentials table
           try {
@@ -608,7 +612,7 @@ async function startServer() {
                 messageAr: conflictMessageAr,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
         }
 
         return res.status(200).json({
@@ -677,7 +681,7 @@ async function startServer() {
                 message: `Subdomain '${normalized}' is already taken.`,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
         }
 
         return res.status(200).json({
@@ -744,7 +748,7 @@ async function startServer() {
                 messageAr: 'اسم مركز البصريات هذا مسجل بالفعل في قاعدة البيانات. يرجى اختيار اسم مختلف أو تعديل المتجر الحالي.',
               });
             }
-          } catch (e) {}
+          } catch (e) { }
         }
 
         return res.status(200).json({
@@ -805,7 +809,7 @@ async function startServer() {
                 message: `This phone number is already registered to agent (${agentPhone.full_name || 'Agent'}).`,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
 
           // 2. Check shops (owner_phone)
           try {
@@ -827,7 +831,7 @@ async function startServer() {
                 message: `This phone number is already associated with shop "${shopPhone.shop_name}".`,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
 
           // 3. Check shop_staff_credentials
           try {
@@ -845,7 +849,7 @@ async function startServer() {
                 message: `This phone number is already linked to staff account (${staffPhone.full_name}).`,
               });
             }
-          } catch (e) {}
+          } catch (e) { }
         }
 
         return res.status(200).json({
@@ -1370,13 +1374,13 @@ async function startServer() {
       for (const uid of createdUserIds) {
         try {
           await adminClient.from('shop_staff_credentials').delete().eq('user_id', uid);
-        } catch {}
+        } catch { }
         try {
           await adminClient.from('profiles').delete().eq('id', uid);
-        } catch {}
+        } catch { }
         try {
           await adminClient.auth.admin.deleteUser(uid);
-        } catch {}
+        } catch { }
       }
 
       return res.status(err.status || 422).json({
@@ -1827,7 +1831,7 @@ async function startServer() {
       try {
         const { data: authLookup } = await adminClient.auth.admin.getUserById(userId);
         existingMeta = authLookup?.user?.user_metadata || {};
-      } catch {}
+      } catch { }
 
       const { error: authUpdateErr } = await adminClient.auth.admin.updateUserById(userId, {
         email: cleanEmail,
