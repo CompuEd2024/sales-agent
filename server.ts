@@ -349,14 +349,16 @@ async function startServer() {
 
   app.use(express.json());
 
-  // In-memory cache for live exchange rates (valid for 6 hours)
+  // In-memory cache for live exchange rates (valid for 24 hours to keep free-plan API usage low)
   interface RatesCache {
     rates: Record<string, number>;
     fetchedAt: string;
+    attribution: string;
+    attributionUrl: string;
   }
 
   let ratesCache: RatesCache | null = null;
-  const RATES_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+  const RATES_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
   async function getJodRates(): Promise<{
     base: string;
@@ -366,74 +368,94 @@ async function startServer() {
     attribution: string;
     attributionUrl: string;
   }> {
-    const now = Date.now();
-    const attribution = 'Rates By Exchange Rate API';
-    const attributionUrl = 'https://www.exchangerate-api.com';
+    const toResult = (c: RatesCache, source: 'live' | 'stale') => ({
+      base: 'JOD',
+      rates: c.rates,
+      fetchedAt: c.fetchedAt,
+      source,
+      attribution: c.attribution,
+      attributionUrl: c.attributionUrl,
+    });
 
-    // Serve fresh in-memory cache if younger than 6 hours
-    if (ratesCache && now - new Date(ratesCache.fetchedAt).getTime() < RATES_CACHE_TTL_MS) {
-      console.log(`[rates] live, ${ratesCache.fetchedAt}`);
-      return {
-        base: 'JOD',
-        rates: ratesCache.rates,
-        fetchedAt: ratesCache.fetchedAt,
-        source: 'live',
-        attribution,
-        attributionUrl,
-      };
+    // Serve fresh in-memory cache if younger than the TTL
+    if (ratesCache && Date.now() - new Date(ratesCache.fetchedAt).getTime() < RATES_CACHE_TTL_MS) {
+      console.log(`[rates] cached, ${ratesCache.fetchedAt}`);
+      return toResult(ratesCache, 'live');
     }
 
-    const apiKey = (process.env.EXCHANGE_RATE_API_KEY || '').trim();
-    // Keyed endpoint first (if a key exists), then the free keyless endpoint as a backup.
-    const urls: string[] = [];
-    if (apiKey) urls.push(`https://v6.exchangerate-api.com/v6/${apiKey}/latest/JOD`);
-    urls.push('https://open.er-api.com/v6/latest/JOD');
-
-    for (const url of urls) {
+    const fetchJson = async (url: string) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
-      const label = url.includes('open.er-api.com') ? 'open.er-api.com' : 'v6 keyed';
       try {
         const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
         const data: any = await res.json().catch(() => null);
+        return { ok: res.ok, status: res.status, data };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
 
-        // The keyed v6 endpoint returns "conversion_rates"; the open endpoint returns "rates".
-        const rates = data && (data.conversion_rates || data.rates);
-
-        if (res.ok && data && data.result === 'success' && rates && typeof rates === 'object') {
-          const fetchedAt = new Date().toISOString();
-          ratesCache = { rates, fetchedAt };
-          console.log(`[rates] live via ${label}, ${fetchedAt}`);
-          return {
-            base: 'JOD',
+    // Provider 1: exchangeratesapi.io (APILayer). Needs EXCHANGERATES_API_KEY.
+    // The free plan only allows the EUR base, so we request EUR-based rates (the default)
+    // and convert them to "1 JOD = X currency" ourselves: rate_X = EUR_to_X / EUR_to_JOD.
+    const apiKey = (process.env.EXCHANGERATES_API_KEY || '').trim();
+    if (apiKey) {
+      try {
+        const { ok, status, data } = await fetchJson(
+          `https://api.exchangeratesapi.io/v1/latest?access_key=${encodeURIComponent(apiKey)}`
+        );
+        const eurRates = data?.rates;
+        const jodPerEur = Number(eurRates?.JOD);
+        if (ok && data?.success === true && eurRates && typeof eurRates === 'object' && jodPerEur > 0) {
+          const rates: Record<string, number> = {};
+          for (const [code, value] of Object.entries(eurRates)) {
+            const v = Number(value);
+            if (Number.isFinite(v) && v > 0) rates[code] = v / jodPerEur;
+          }
+          rates.EUR = 1 / jodPerEur;
+          rates.JOD = 1;
+          const fresh: RatesCache = {
             rates,
-            fetchedAt,
-            source: 'live',
-            attribution,
-            attributionUrl,
+            fetchedAt: new Date().toISOString(),
+            attribution: 'Rates by Exchange Rates API',
+            attributionUrl: 'https://exchangeratesapi.io',
           };
+          ratesCache = fresh;
+          console.log(`[rates] live via exchangeratesapi.io, ${fresh.fetchedAt}`);
+          return toResult(fresh, 'live');
         }
         console.warn(
-          `[rates] ${label} failed: http ${res.status}, result=${data?.result}, error-type=${data?.['error-type']}`
+          `[rates] exchangeratesapi.io failed: http ${status}, success=${data?.success}, ` +
+            `type=${data?.error?.type}, info=${data?.error?.info}, JOD present=${jodPerEur > 0}`
         );
       } catch (err: any) {
-        clearTimeout(timeoutId);
-        console.warn(`[rates] ${label} fetch failed or timed out:`, err?.message || err);
+        console.warn('[rates] exchangeratesapi.io fetch failed or timed out:', err?.message || err);
       }
     }
 
-    // If refresh failed but we have a previous cache, serve as stale
+    // Provider 2 (backup, no key needed): open.er-api.com, already JOD-based.
+    try {
+      const { ok, status, data } = await fetchJson('https://open.er-api.com/v6/latest/JOD');
+      if (ok && data?.result === 'success' && data.rates && typeof data.rates === 'object') {
+        const fresh: RatesCache = {
+          rates: data.rates,
+          fetchedAt: new Date().toISOString(),
+          attribution: 'Rates By Exchange Rate API',
+          attributionUrl: 'https://www.exchangerate-api.com',
+        };
+        ratesCache = fresh;
+        console.log(`[rates] live via open.er-api.com (backup), ${fresh.fetchedAt}`);
+        return toResult(fresh, 'live');
+      }
+      console.warn(`[rates] open.er-api.com failed: http ${status}, result=${data?.result}`);
+    } catch (err: any) {
+      console.warn('[rates] open.er-api.com fetch failed or timed out:', err?.message || err);
+    }
+
+    // Both providers failed: serve the previous cache as stale if we have one
     if (ratesCache) {
       console.log(`[rates] stale, ${ratesCache.fetchedAt}`);
-      return {
-        base: 'JOD',
-        rates: ratesCache.rates,
-        fetchedAt: ratesCache.fetchedAt,
-        source: 'stale',
-        attribution,
-        attributionUrl,
-      };
+      return toResult(ratesCache, 'stale');
     }
 
     // No cache available: return unavailable fallback (never throw 500)
@@ -444,8 +466,8 @@ async function startServer() {
       rates: {},
       fetchedAt,
       source: 'unavailable',
-      attribution,
-      attributionUrl,
+      attribution: 'Rates By Exchange Rate API',
+      attributionUrl: 'https://www.exchangerate-api.com',
     };
   }
 
